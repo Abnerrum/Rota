@@ -1,10 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
 from math import radians, sin, cos, sqrt, atan2
+from app.cobli import CobliClient, CobliError
 
-app=FastAPI(title="Rota API",version="0.1.0")
+app=FastAPI(title="Rota API",version="0.2.0")
 
 technicians=[
  {"id":1,"name":"Ana Silva","lat":-16.6869,"lng":-49.2648,"status":"Disponível"},
@@ -42,6 +42,29 @@ def optimize():
   t=min(technicians,key=lambda x:distance(x,o))
   result.append({"order":o,"technician":t,"distance_km":round(distance(t,o),1)})
  return {"routes":result}
+
+def cobli_call(method,*args,**kwargs):
+ try:
+  return getattr(CobliClient(),method)(*args,**kwargs)
+ except CobliError as e:
+  raise HTTPException(status_code=e.status_code,detail=e.message)
+
+@app.get("/api/cobli/status")
+def cobli_status(): return CobliClient().status()
+
+@app.get("/api/cobli/drivers")
+def cobli_drivers(limit:int=200,page:int=1): return cobli_call("drivers",limit,page)
+
+@app.get("/api/cobli/devices")
+def cobli_devices(limit:int=200,page:int=1): return cobli_call("devices",limit,page)
+
+@app.get("/api/cobli/routes")
+def cobli_routes(start_in_millis:int|None=None,end_in_millis:int|None=None):
+ return cobli_call("routes",start_in_millis,end_in_millis)
+
+@app.get("/api/cobli/paths")
+def cobli_paths(startDate:str,endDate:str,limit:int=200,page:int=1):
+ return cobli_call("paths",startDate,endDate,limit,page)
 
 app.mount("/static",StaticFiles(directory="static"),name="static")
 @app.get("/")
