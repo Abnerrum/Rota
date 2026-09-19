@@ -1,33 +1,46 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from math import atan2, cos, radians, sin, sqrt
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from geoalchemy2.elements import WKTElement
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, joinedload
 
 from app.cobli import CobliClient, CobliError
+from app.database import Base, engine, get_db
+from app.models import Customer, ServiceOrder, Technician, Vehicle
+from app.schemas import (
+    CustomerCreate, CustomerOut, CustomerUpdate,
+    OrderCreate, OrderUpdate,
+    TechnicianCreate, TechnicianOut, TechnicianUpdate,
+    VehicleCreate, VehicleOut, VehicleUpdate,
+)
+from app.seed import seed_database
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    seed_database()
+    yield
+
 
 app = FastAPI(
     title="Rota API",
-    version="0.3.0",
+    version="0.4.0",
     description="Plataforma brasileira para operações de campo, rotas e ordens de serviço.",
+    lifespan=lifespan,
 )
 
-technicians = [
-    {"id": 1, "name": "Ana Silva", "lat": -16.6869, "lng": -49.2648, "status": "Disponível", "skills": ["instalacao", "manutencao"], "capacity": 4},
-    {"id": 2, "name": "Carlos Souza", "lat": -16.7270, "lng": -49.2530, "status": "Em rota", "skills": ["manutencao"], "capacity": 3},
-    {"id": 3, "name": "Marcos Lima", "lat": -16.7490, "lng": -49.2850, "status": "Disponível", "skills": ["instalacao", "vistoria"], "capacity": 4},
-]
-
-orders = [
-    {"id": 1001, "customer": "Loja Centro", "address": "Centro, Goiânia", "lat": -16.6799, "lng": -49.2550, "priority": "Alta", "status": "Pendente", "type": "manutencao", "sla_hours": 4, "age_hours": 3.2},
-    {"id": 1002, "customer": "Cliente Bueno", "address": "Setor Bueno, Goiânia", "lat": -16.7040, "lng": -49.2730, "priority": "Normal", "status": "Pendente", "type": "instalacao", "sla_hours": 24, "age_hours": 8.0},
-    {"id": 1003, "customer": "Empresa Aparecida", "address": "Aparecida de Goiânia", "lat": -16.8235, "lng": -49.2439, "priority": "Crítica", "status": "Pendente", "type": "manutencao", "sla_hours": 2, "age_hours": 1.7},
-    {"id": 1004, "customer": "Cliente Jardim América", "address": "Jardim América, Goiânia", "lat": -16.7160, "lng": -49.2910, "priority": "Normal", "status": "Pendente", "type": "vistoria", "sla_hours": 12, "age_hours": 10.5},
-]
-
 PRIORITY_WEIGHT = {"Crítica": 3, "Alta": 2, "Normal": 1}
+
+
+def point(lat: float, lng: float):
+    return WKTElement(f"POINT({lng} {lat})", srid=4326)
 
 
 def distance(a, b):
@@ -39,8 +52,15 @@ def distance(a, b):
     return 2 * radius * atan2(sqrt(x), sqrt(1 - x))
 
 
-def sla_risk(order):
-    ratio = order["age_hours"] / max(order["sla_hours"], 0.1)
+def age_hours(order: ServiceOrder):
+    created = order.created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return max((datetime.now(timezone.utc) - created).total_seconds() / 3600, 0)
+
+
+def sla_risk(order: ServiceOrder):
+    ratio = age_hours(order) / max(order.sla_hours, 0.1)
     if ratio >= 1:
         return "Estourado"
     if ratio >= 0.75:
@@ -50,17 +70,43 @@ def sla_risk(order):
     return "Dentro do prazo"
 
 
-def enrich_order(order):
-    item = dict(order)
-    item["sla_risk"] = sla_risk(order)
-    item["sla_remaining_hours"] = round(order["sla_hours"] - order["age_hours"], 1)
-    return item
+def order_dict(order: ServiceOrder):
+    age = age_hours(order)
+    return {
+        "id": order.id,
+        "customer_id": order.customer_id,
+        "customer": order.customer.name if order.customer else f"Cliente #{order.customer_id}",
+        "technician_id": order.technician_id,
+        "vehicle_id": order.vehicle_id,
+        "address": order.address,
+        "lat": order.lat,
+        "lng": order.lng,
+        "priority": order.priority,
+        "status": order.status,
+        "type": order.type,
+        "sla_hours": order.sla_hours,
+        "age_hours": round(age, 1),
+        "sla_risk": sla_risk(order),
+        "sla_remaining_hours": round(order.sla_hours - age, 1),
+        "created_at": order.created_at,
+    }
+
+
+def update_instance(instance, payload: dict):
+    lat_changed = "lat" in payload
+    lng_changed = "lng" in payload
+    for key, value in payload.items():
+        setattr(instance, key, value)
+    if hasattr(instance, "location") and (lat_changed or lng_changed):
+        instance.location = point(instance.lat, instance.lng)
 
 
 @app.get("/api/health")
-def health():
+def health(db: Session = Depends(get_db)):
+    db.execute(select(1))
     return {
         "status": "ok",
+        "database": "online",
         "service": "rota-api",
         "version": app.version,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -68,76 +114,282 @@ def health():
 
 
 @app.get("/api/dashboard")
-def dashboard():
-    enriched = [enrich_order(o) for o in orders]
+def dashboard(db: Session = Depends(get_db)):
+    orders = db.scalars(select(ServiceOrder).options(joinedload(ServiceOrder.customer))).all()
+    techs = db.scalars(select(Technician)).all()
     return {
         "orders": len(orders),
-        "technicians": len(technicians),
-        "pending": sum(o["status"] == "Pendente" for o in orders),
-        "available_technicians": sum(t["status"] == "Disponível" for t in technicians),
-        "critical_orders": sum(o["priority"] == "Crítica" for o in orders),
-        "sla_risk": sum(o["sla_risk"] in {"Crítico", "Estourado"} for o in enriched),
-        "routes": 0,
+        "technicians": len(techs),
+        "pending": sum(o.status == "Pendente" for o in orders),
+        "available_technicians": sum(t.status == "Disponível" for t in techs),
+        "critical_orders": sum(o.priority == "Crítica" for o in orders),
+        "sla_risk": sum(sla_risk(o) in {"Crítico", "Estourado"} for o in orders),
+        "routes": sum(o.technician_id is not None for o in orders),
     }
 
 
-@app.get("/api/technicians")
-def get_technicians(status: str | None = Query(default=None)):
-    if not status:
-        return technicians
-    return [t for t in technicians if t["status"].lower() == status.lower()]
+# CLIENTES
+@app.get("/api/customers", response_model=list[CustomerOut])
+def list_customers(db: Session = Depends(get_db)):
+    return db.scalars(select(Customer).order_by(Customer.name)).all()
 
 
+@app.post("/api/customers", response_model=CustomerOut, status_code=status.HTTP_201_CREATED)
+def create_customer(data: CustomerCreate, db: Session = Depends(get_db)):
+    obj = Customer(**data.model_dump(), location=point(data.lat, data.lng))
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@app.get("/api/customers/{customer_id}", response_model=CustomerOut)
+def get_customer(customer_id: int, db: Session = Depends(get_db)):
+    obj = db.get(Customer, customer_id)
+    if not obj:
+        raise HTTPException(404, "Cliente não encontrado.")
+    return obj
+
+
+@app.patch("/api/customers/{customer_id}", response_model=CustomerOut)
+def update_customer(customer_id: int, data: CustomerUpdate, db: Session = Depends(get_db)):
+    obj = db.get(Customer, customer_id)
+    if not obj:
+        raise HTTPException(404, "Cliente não encontrado.")
+    update_instance(obj, data.model_dump(exclude_unset=True))
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@app.delete("/api/customers/{customer_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_customer(customer_id: int, db: Session = Depends(get_db)):
+    obj = db.get(Customer, customer_id)
+    if not obj:
+        raise HTTPException(404, "Cliente não encontrado.")
+    if db.scalar(select(func.count(ServiceOrder.id)).where(ServiceOrder.customer_id == customer_id)):
+        raise HTTPException(409, "Cliente possui ordens de serviço e não pode ser excluído.")
+    db.delete(obj)
+    db.commit()
+
+
+# TÉCNICOS
+@app.get("/api/technicians", response_model=list[TechnicianOut])
+def list_technicians(status_filter: str | None = Query(default=None, alias="status"), db: Session = Depends(get_db)):
+    stmt = select(Technician).order_by(Technician.name)
+    if status_filter:
+        stmt = stmt.where(func.lower(Technician.status) == status_filter.lower())
+    return db.scalars(stmt).all()
+
+
+@app.post("/api/technicians", response_model=TechnicianOut, status_code=status.HTTP_201_CREATED)
+def create_technician(data: TechnicianCreate, db: Session = Depends(get_db)):
+    obj = Technician(**data.model_dump(), location=point(data.lat, data.lng))
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@app.get("/api/technicians/{technician_id}", response_model=TechnicianOut)
+def get_technician(technician_id: int, db: Session = Depends(get_db)):
+    obj = db.get(Technician, technician_id)
+    if not obj:
+        raise HTTPException(404, "Técnico não encontrado.")
+    return obj
+
+
+@app.patch("/api/technicians/{technician_id}", response_model=TechnicianOut)
+def update_technician(technician_id: int, data: TechnicianUpdate, db: Session = Depends(get_db)):
+    obj = db.get(Technician, technician_id)
+    if not obj:
+        raise HTTPException(404, "Técnico não encontrado.")
+    update_instance(obj, data.model_dump(exclude_unset=True))
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@app.delete("/api/technicians/{technician_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_technician(technician_id: int, db: Session = Depends(get_db)):
+    obj = db.get(Technician, technician_id)
+    if not obj:
+        raise HTTPException(404, "Técnico não encontrado.")
+    for order in obj.orders:
+        order.technician_id = None
+    for vehicle in obj.vehicles:
+        vehicle.technician_id = None
+    db.delete(obj)
+    db.commit()
+
+
+# VEÍCULOS
+@app.get("/api/vehicles", response_model=list[VehicleOut])
+def list_vehicles(db: Session = Depends(get_db)):
+    return db.scalars(select(Vehicle).order_by(Vehicle.plate)).all()
+
+
+@app.post("/api/vehicles", response_model=VehicleOut, status_code=status.HTTP_201_CREATED)
+def create_vehicle(data: VehicleCreate, db: Session = Depends(get_db)):
+    if data.technician_id and not db.get(Technician, data.technician_id):
+        raise HTTPException(400, "Técnico informado não existe.")
+    obj = Vehicle(**data.model_dump())
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@app.get("/api/vehicles/{vehicle_id}", response_model=VehicleOut)
+def get_vehicle(vehicle_id: int, db: Session = Depends(get_db)):
+    obj = db.get(Vehicle, vehicle_id)
+    if not obj:
+        raise HTTPException(404, "Veículo não encontrado.")
+    return obj
+
+
+@app.patch("/api/vehicles/{vehicle_id}", response_model=VehicleOut)
+def update_vehicle(vehicle_id: int, data: VehicleUpdate, db: Session = Depends(get_db)):
+    obj = db.get(Vehicle, vehicle_id)
+    if not obj:
+        raise HTTPException(404, "Veículo não encontrado.")
+    payload = data.model_dump(exclude_unset=True)
+    if payload.get("technician_id") and not db.get(Technician, payload["technician_id"]):
+        raise HTTPException(400, "Técnico informado não existe.")
+    update_instance(obj, payload)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@app.delete("/api/vehicles/{vehicle_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_vehicle(vehicle_id: int, db: Session = Depends(get_db)):
+    obj = db.get(Vehicle, vehicle_id)
+    if not obj:
+        raise HTTPException(404, "Veículo não encontrado.")
+    db.delete(obj)
+    db.commit()
+
+
+# ORDENS DE SERVIÇO
 @app.get("/api/orders")
-def get_orders(
-    priority: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-    risk: str | None = Query(default=None),
+def list_orders(
+    priority: str | None = None,
+    status_filter: str | None = Query(default=None, alias="status"),
+    risk: str | None = None,
+    db: Session = Depends(get_db),
 ):
-    result = [enrich_order(o) for o in orders]
+    stmt = select(ServiceOrder).options(joinedload(ServiceOrder.customer)).order_by(ServiceOrder.created_at.desc())
     if priority:
-        result = [o for o in result if o["priority"].lower() == priority.lower()]
-    if status:
-        result = [o for o in result if o["status"].lower() == status.lower()]
+        stmt = stmt.where(func.lower(ServiceOrder.priority) == priority.lower())
+    if status_filter:
+        stmt = stmt.where(func.lower(ServiceOrder.status) == status_filter.lower())
+    result = [order_dict(o) for o in db.scalars(stmt).all()]
     if risk:
         result = [o for o in result if o["sla_risk"].lower() == risk.lower()]
     return result
 
 
+@app.post("/api/orders", status_code=status.HTTP_201_CREATED)
+def create_order(data: OrderCreate, db: Session = Depends(get_db)):
+    if not db.get(Customer, data.customer_id):
+        raise HTTPException(400, "Cliente informado não existe.")
+    if data.technician_id and not db.get(Technician, data.technician_id):
+        raise HTTPException(400, "Técnico informado não existe.")
+    if data.vehicle_id and not db.get(Vehicle, data.vehicle_id):
+        raise HTTPException(400, "Veículo informado não existe.")
+    obj = ServiceOrder(**data.model_dump(), location=point(data.lat, data.lng))
+    db.add(obj)
+    db.commit()
+    obj = db.scalar(select(ServiceOrder).options(joinedload(ServiceOrder.customer)).where(ServiceOrder.id == obj.id))
+    return order_dict(obj)
+
+
+@app.get("/api/orders/{order_id}")
+def get_order(order_id: int, db: Session = Depends(get_db)):
+    obj = db.scalar(select(ServiceOrder).options(joinedload(ServiceOrder.customer)).where(ServiceOrder.id == order_id))
+    if not obj:
+        raise HTTPException(404, "Ordem de serviço não encontrada.")
+    return order_dict(obj)
+
+
+@app.patch("/api/orders/{order_id}")
+def update_order(order_id: int, data: OrderUpdate, db: Session = Depends(get_db)):
+    obj = db.get(ServiceOrder, order_id)
+    if not obj:
+        raise HTTPException(404, "Ordem de serviço não encontrada.")
+    payload = data.model_dump(exclude_unset=True)
+    if payload.get("customer_id") and not db.get(Customer, payload["customer_id"]):
+        raise HTTPException(400, "Cliente informado não existe.")
+    if payload.get("technician_id") and not db.get(Technician, payload["technician_id"]):
+        raise HTTPException(400, "Técnico informado não existe.")
+    if payload.get("vehicle_id") and not db.get(Vehicle, payload["vehicle_id"]):
+        raise HTTPException(400, "Veículo informado não existe.")
+    update_instance(obj, payload)
+    db.commit()
+    obj = db.scalar(select(ServiceOrder).options(joinedload(ServiceOrder.customer)).where(ServiceOrder.id == order_id))
+    return order_dict(obj)
+
+
+@app.delete("/api/orders/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_order(order_id: int, db: Session = Depends(get_db)):
+    obj = db.get(ServiceOrder, order_id)
+    if not obj:
+        raise HTTPException(404, "Ordem de serviço não encontrada.")
+    db.delete(obj)
+    db.commit()
+
+
 @app.post("/api/optimize")
-def optimize(strategy: Literal["balanced", "nearest"] = "balanced"):
+def optimize(strategy: Literal["balanced", "nearest"] = "balanced", db: Session = Depends(get_db)):
+    order_rows = db.scalars(
+        select(ServiceOrder)
+        .options(joinedload(ServiceOrder.customer))
+        .where(ServiceOrder.status == "Pendente")
+    ).all()
+    technicians = db.scalars(select(Technician)).all()
+
+    if not technicians:
+        raise HTTPException(409, "Cadastre ao menos um técnico antes de otimizar.")
+
     pending_orders = sorted(
-        [o for o in orders if o["status"] == "Pendente"],
-        key=lambda o: (-PRIORITY_WEIGHT.get(o["priority"], 0), o["sla_hours"] - o["age_hours"]),
+        order_rows,
+        key=lambda o: (-PRIORITY_WEIGHT.get(o.priority, 0), o.sla_hours - age_hours(o)),
     )
-    load = {t["id"]: 0 for t in technicians}
+    load = {t.id: 0 for t in technicians}
     result = []
 
     for order in pending_orders:
-        compatible = [t for t in technicians if order["type"] in t.get("skills", [])]
+        compatible = [t for t in technicians if order.type in (t.skills or [])]
         candidates = compatible or technicians
+        order_location = {"lat": order.lat, "lng": order.lng}
 
         def score(tech):
-            km = distance(tech, order)
+            tech_location = {"lat": tech.lat, "lng": tech.lng}
+            km = distance(tech_location, order_location)
             if strategy == "nearest":
                 return km
-            capacity = max(tech.get("capacity", 1), 1)
-            load_penalty = (load[tech["id"]] / capacity) * 15
-            status_penalty = 5 if tech["status"] != "Disponível" else 0
+            capacity = max(tech.capacity, 1)
+            load_penalty = (load[tech.id] / capacity) * 15
+            status_penalty = 5 if tech.status != "Disponível" else 0
             return km + load_penalty + status_penalty
 
         tech = min(candidates, key=score)
-        load[tech["id"]] += 1
-        result.append(
-            {
-                "order": enrich_order(order),
-                "technician": tech,
-                "distance_km": round(distance(tech, order), 1),
-                "assigned_load": load[tech["id"]],
-                "strategy": strategy,
-            }
-        )
+        load[tech.id] += 1
+        order.technician_id = tech.id
 
+        result.append({
+            "order": order_dict(order),
+            "technician": {
+                "id": tech.id, "name": tech.name, "lat": tech.lat, "lng": tech.lng,
+                "status": tech.status, "capacity": tech.capacity, "skills": tech.skills,
+            },
+            "distance_km": round(distance({"lat": tech.lat, "lng": tech.lng}, order_location), 1),
+            "assigned_load": load[tech.id],
+            "strategy": strategy,
+        })
+
+    db.commit()
     total_km = round(sum(item["distance_km"] for item in result), 1)
     return {
         "routes": result,
