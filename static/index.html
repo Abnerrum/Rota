@@ -1,1 +1,108 @@
-<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="RotaIA — gestão inteligente de operações de campo"><title>RotaIA | Operações Inteligentes</title><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"><link rel="stylesheet" href="./style.css"></head><body><aside><h1>ROTA<span>IA</span></h1><p>Central de Operações</p><nav><button onclick="show('dashboard')">◫ Dashboard</button><button onclick="show('map')">⌖ Planejamento de Rotas</button><button onclick="show('orders')">▤ Ordens de Serviço</button><button onclick="show('techs')">♟ Equipes</button></nav><small>MVP • Brasil</small></aside><main><header><div><h2 id="title">Visão Operacional</h2><p>Planeje, distribua e acompanhe sua operação.</p></div><button class="primary" onclick="optimize()">⚡ Planejar rotas</button></header><div id="apiAlert" class="alert hidden"></div><section id="dashboard"><div class="cards"><article><b id="ordersN">0</b><span>Ordens de serviço</span></article><article><b id="pendingN">0</b><span>Pendentes</span></article><article><b id="techN">0</b><span>Técnicos</span></article><article><b id="routesN">0</b><span>Rotas planejadas</span></article></div><div class="panel"><h3>Centro de Operações</h3><p>Use “Planejar rotas” para distribuir automaticamente as OS entre os técnicos mais próximos.</p><div id="miniMap" class="map"></div></div></section><section id="map" class="hidden"><div class="panel"><h3>Mapa e otimização</h3><div id="bigMap" class="map big"></div><div id="result"></div></div></section><section id="orders" class="hidden"><div class="panel"><h3>Ordens de Serviço</h3><div id="orderList"></div></div></section><section id="techs" class="hidden"><div class="panel"><h3>Equipe de Campo</h3><div id="techList"></div></div></section></main><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script src="./config.js"></script><script src="./app.js"></script></body></html>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="RotaIA — gestão inteligente de operações de campo">
+  <title>RotaIA | Operações Inteligentes</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <aside>
+    <h1>ROTA<span>IA</span></h1>
+    <p>Central de Operações</p>
+    <nav>
+      <button onclick="show('dashboard')">◫ Dashboard</button>
+      <button onclick="show('map')">⌖ Planejamento de Rotas</button>
+      <button onclick="show('orders')">▤ Ordens de Serviço</button>
+      <button onclick="show('techs')">♟ Equipes</button>
+    </nav>
+    <small>MVP • Brasil • v0.3</small>
+  </aside>
+
+  <main>
+    <header>
+      <div>
+        <h2 id="title">Visão Operacional</h2>
+        <p>Planeje, distribua e acompanhe sua operação em campo.</p>
+      </div>
+      <div class="header-actions">
+        <select id="strategy">
+          <option value="balanced">Balancear carga</option>
+          <option value="nearest">Mais próximo</option>
+        </select>
+        <button class="primary" onclick="optimize()">⚡ Planejar rotas</button>
+      </div>
+    </header>
+
+    <div id="apiAlert" class="alert hidden"></div>
+
+    <section id="dashboard">
+      <div class="cards">
+        <article><b id="ordersN">0</b><span>Ordens de serviço</span></article>
+        <article><b id="pendingN">0</b><span>Pendentes</span></article>
+        <article><b id="criticalN">0</b><span>Prioridade crítica</span></article>
+        <article><b id="slaN">0</b><span>Risco de SLA</span></article>
+        <article><b id="techN">0</b><span>Técnicos</span></article>
+        <article><b id="availableN">0</b><span>Disponíveis</span></article>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">
+          <div>
+            <h3>Centro de Operações</h3>
+            <p>Mapa operacional com ordens, equipes e acompanhamento de risco.</p>
+          </div>
+          <span id="healthBadge" class="status-dot">verificando API</span>
+        </div>
+        <div id="miniMap" class="map"></div>
+      </div>
+    </section>
+
+    <section id="map" class="hidden">
+      <div class="panel">
+        <h3>Mapa e otimização</h3>
+        <div id="bigMap" class="map big"></div>
+        <div id="routeSummary" class="summary-grid"></div>
+        <div id="result"></div>
+      </div>
+    </section>
+
+    <section id="orders" class="hidden">
+      <div class="panel">
+        <div class="panel-title">
+          <h3>Ordens de Serviço</h3>
+          <div class="filters">
+            <select id="priorityFilter" onchange="renderOrders()">
+              <option value="">Todas prioridades</option>
+              <option>Crítica</option>
+              <option>Alta</option>
+              <option>Normal</option>
+            </select>
+            <select id="riskFilter" onchange="renderOrders()">
+              <option value="">Todos SLAs</option>
+              <option>Estourado</option>
+              <option>Crítico</option>
+              <option>Atenção</option>
+              <option>Dentro do prazo</option>
+            </select>
+          </div>
+        </div>
+        <div id="orderList"></div>
+      </div>
+    </section>
+
+    <section id="techs" class="hidden">
+      <div class="panel">
+        <h3>Equipe de Campo</h3>
+        <div id="techList"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="./config.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
