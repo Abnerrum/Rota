@@ -79,6 +79,54 @@ Acesse:
 - `GET /api/cobli/routes`
 - `GET /api/cobli/paths?startDate=...&endDate=...`
 
+
+## Persistência v0.4 — PostgreSQL + PostGIS
+
+O projeto agora usa banco de dados persistente com SQLAlchemy e PostGIS.
+
+### Subir o ambiente
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Na primeira inicialização, o sistema cria as tabelas automaticamente e insere dados de demonstração somente se o banco estiver vazio.
+
+### CRUD de clientes
+
+- `GET /api/customers`
+- `POST /api/customers`
+- `GET /api/customers/{id}`
+- `PATCH /api/customers/{id}`
+- `DELETE /api/customers/{id}`
+
+### CRUD de técnicos
+
+- `GET /api/technicians`
+- `POST /api/technicians`
+- `GET /api/technicians/{id}`
+- `PATCH /api/technicians/{id}`
+- `DELETE /api/technicians/{id}`
+
+### CRUD de veículos
+
+- `GET /api/vehicles`
+- `POST /api/vehicles`
+- `GET /api/vehicles/{id}`
+- `PATCH /api/vehicles/{id}`
+- `DELETE /api/vehicles/{id}`
+
+### CRUD de ordens de serviço
+
+- `GET /api/orders`
+- `POST /api/orders`
+- `GET /api/orders/{id}`
+- `PATCH /api/orders/{id}`
+- `DELETE /api/orders/{id}`
+
+As entidades com coordenadas possuem coluna geoespacial `POINT SRID 4326`, preparada para consultas futuras com PostGIS.
+
 ## Arquitetura planejada
 
 ```text
