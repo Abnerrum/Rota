@@ -1,6 +1,32 @@
 services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rota}
+      POSTGRES_USER: ${POSTGRES_USER:-rota}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rota}
+    ports:
+      - "5432:5432"
+    volumes:
+      - rota_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rota} -d ${POSTGRES_DB:-rota}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   rota:
     build: .
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://rota:rota@db:5432/rota}
+      COBLI_API_KEY: ${COBLI_API_KEY:-}
     ports:
       - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  rota_postgres_data:
